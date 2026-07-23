@@ -1,14 +1,7 @@
-# Freela Comenta Game
-
-Fonte oficial reconstruida a partir de `novo 2/Bot.exe`.
-
-O codigo do `novo 2` foi promovido para a raiz do projeto. A implementacao
-antiga da raiz e a pasta `novo/` foram enviadas para a Lixeira.
-
 ## Como rodar
 
 ```powershell
-cd "C:\Users\Administrator\Desktop\freela comenta game"
+cd "C:\Users\Administrator\Desktop\Ikariam-divulgacao"
 .venv312\Scripts\python.exe main.py
 ```
 

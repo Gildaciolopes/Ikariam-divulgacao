@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Virtualenv
+.venv/
+.venv312/
+venv/
+env/
+
+# Dados locais / banco
+data/
+*.sqlite3
+*.sqlite
+*.db
+
+# Selenium / webdriver cache
+.wdm/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Ambiente
+.env
+*.log

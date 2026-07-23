@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="pt-br">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bot Divulgação</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      :root {
+        --font-sans: "Space Grotesk", system-ui, sans-serif;
+        --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+          "Courier New", monospace;
+      }
+      body {
+        font-family: var(--font-sans);
+      }
+      .fade-up {
+        animation: fadeUp 0.6s ease both;
+      }
+      .fade-delay-1 {
+        animation-delay: 0.08s;
+      }
+      .fade-delay-2 {
+        animation-delay: 0.16s;
+      }
+      .fade-delay-3 {
+        animation-delay: 0.24s;
+      }
+      @keyframes fadeUp {
+        0% {
+          opacity: 0;
+          transform: translateY(14px);
+        }
+        100% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+    </style>
+  </head>
+  <body class="min-h-screen bg-slate-950 text-slate-100">
+    <div class="relative isolate overflow-hidden">
+      <div class="absolute -top-40 right-0 h-96 w-96 rounded-full bg-cyan-500/20 blur-3xl"></div>
+      <div class="absolute bottom-0 left-0 h-[28rem] w-[28rem] rounded-full bg-amber-500/10 blur-3xl"></div>
+      <div class="absolute left-1/2 top-0 h-80 w-[32rem] -translate-x-1/2 rounded-full bg-indigo-500/10 blur-[120px]"></div>
+
+      <main class="relative z-10 mx-auto max-w-6xl px-6 py-10">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </body>
+</html>

@@ -1,0 +1,781 @@
+{% extends "base.html" %}
+
+{% block content %}
+  <header class="mb-10 flex flex-col gap-6">
+    <div class="fade-up text-xs uppercase tracking-[0.45em] text-slate-500">Painel Operacional</div>
+    <div class="fade-up fade-delay-1 flex flex-wrap items-end justify-between gap-4">
+      <div>
+        <h1 class="text-3xl font-semibold text-white md:text-4xl">Bot Divulgação</h1>
+        <p class="mt-2 max-w-2xl text-sm text-slate-300">
+          Gerencie contas, configure o envio e acompanhe os logs em tempo real.
+        </p>
+      </div>
+      <div class="flex items-center gap-2 rounded-full border border-slate-800/70 bg-slate-900/60 px-4 py-2 text-xs">
+        <span class="h-2 w-2 rounded-full {{ 'bg-rose-400' if bot_state.stopping else 'bg-emerald-400' if bot_state.running and not bot_state.paused else 'bg-amber-300' if bot_state.paused else 'bg-slate-500' }}"></span>
+        <span class="text-slate-300">
+          {% if bot_state.stopping %}
+            Parando
+          {% elif bot_state.running and bot_state.paused %}
+            Pausado
+          {% elif bot_state.running %}
+            Em execução
+          {% else %}
+            Parado
+          {% endif %}
+        </span>
+      </div>
+    </div>
+
+    <div class="fade-up fade-delay-2"></div>
+  </header>
+
+  <div class="fade-up fade-delay-3">
+    <div class="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-800/80 bg-slate-900/70 p-2" role="tablist">
+      <button
+        type="button"
+        data-tab-target="tab-main"
+        class="tab-button rounded-xl px-4 py-2 text-sm font-semibold text-slate-300 transition"
+      >
+        Principal
+      </button>
+      <button
+        type="button"
+        data-tab-target="tab-config"
+        class="tab-button rounded-xl px-4 py-2 text-sm font-semibold text-slate-300 transition"
+      >
+        Configurações
+      </button>
+    </div>
+  </div>
+
+  <div class="mt-6">
+    <section id="tab-main" data-tab-panel class="space-y-6">
+      <div class="grid gap-6 xl:grid-cols-[1.25fr,0.9fr]">
+        <div class="space-y-6">
+          <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+            <h2 class="text-lg font-semibold">Controle rápido</h2>
+            <p class="mt-2 text-sm text-slate-400">
+              Inicie, pause ou pare o bot. As configurações são aplicadas na aba Configurações.
+            </p>
+
+            <div class="mt-6 grid gap-3 md:grid-cols-3">
+              <form action="/bot/start" method="post">
+                <button
+                  type="submit"
+                  class="w-full rounded-xl border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-400/20 {{ 'opacity-50 cursor-not-allowed' if bot_state.running or accounts|length == 0 else '' }}"
+                  {% if bot_state.running or accounts|length == 0 %}disabled{% endif %}
+                >
+                  Iniciar
+                </button>
+              </form>
+              <form action="/bot/pause" method="post">
+                <button
+                  type="submit"
+                  class="w-full inline-flex items-center justify-center whitespace-nowrap rounded-xl border border-amber-300/40 bg-amber-300/10 px-3 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-300/20 md:text-sm {{ 'opacity-50 cursor-not-allowed' if not bot_state.running or bot_state.stopping else '' }}"
+                  {% if not bot_state.running or bot_state.stopping %}disabled{% endif %}
+                >
+                  {{ 'Retomar' if bot_state.paused else 'Pausar' }}
+                </button>
+              </form>
+              <form action="/bot/stop" method="post">
+                <button
+                  type="submit"
+                  class="w-full rounded-xl border border-rose-400/40 bg-rose-400/10 px-4 py-2 text-sm font-semibold text-rose-200 transition hover:bg-rose-400/20 {{ 'opacity-50 cursor-not-allowed' if not bot_state.running or bot_state.stopping else '' }}"
+                  {% if not bot_state.running or bot_state.stopping %}disabled{% endif %}
+                >
+                  {{ 'Parando...' if bot_state.stopping else 'Parar' }}
+                </button>
+              </form>
+            </div>
+            {% if accounts|length == 0 %}
+              <div class="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                Cadastre pelo menos uma conta antes de iniciar o bot.
+              </div>
+            {% endif %}
+
+            <div class="mt-6 grid gap-4 md:grid-cols-2">
+              <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Tempo</div>
+                <div class="mt-2 text-lg text-white">{{ bot_state.settings.time_wait }}s</div>
+              </div>
+              <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Headless</div>
+                <div class="mt-2 text-lg text-white">
+                  {{ 'Ativo' if bot_state.settings.headless else 'Desativado' }}
+                </div>
+              </div>
+              <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Simular envio</div>
+                <div class="mt-2 text-lg text-white">
+                  {{ 'Ativo' if bot_state.settings.dry_run else 'Desativado' }}
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-6 grid gap-4 md:grid-cols-2">
+              <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Contas</div>
+                <div class="mt-2 text-lg text-white">{{ accounts | length }}</div>
+                <div class="mt-2 text-xs text-slate-400">
+                  Ativas: {{ accounts | selectattr('status', 'equalto', 'activate') | list | length }}
+                </div>
+              </div>
+              <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+                <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Status</div>
+                <div class="mt-2 text-lg text-white">
+                  {% if bot_state.stopping %}
+                    Parando
+                  {% elif bot_state.running and bot_state.paused %}
+                    Pausado
+                  {% elif bot_state.running %}
+                    Executando
+                  {% else %}
+                    Parado
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+            <h2 class="text-lg font-semibold">Servidores</h2>
+            <p class="mt-2 text-sm text-slate-400">Servidores com mensagens enviadas:</p>
+            <div id="servers-summary" class="mt-4 flex flex-wrap gap-2 text-[11px]">
+              {% for server in server_summary %}
+                <span class="inline-flex items-center gap-2 rounded-full border border-slate-700/60 px-2 py-0.5 text-slate-300">
+                  <span>{{ server.server }}</span>
+                  <span class="rounded-full bg-slate-800/80 px-1.5 py-0.5 text-[10px] text-slate-200">
+                    {{ server.sent or 0 }}
+                  </span>
+                </span>
+              {% else %}
+                <span class="text-slate-500">Nenhum servidor enviando agora.</span>
+              {% endfor %}
+            </div>
+          </div>
+
+          <div class="grid gap-6 lg:grid-cols-2">
+            <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+              <h2 class="text-lg font-semibold">Nova conta</h2>
+              <p class="mt-2 text-sm text-slate-400">A mensagem padrão é aplicada automaticamente.</p>
+              <form action="/accounts" method="post" class="mt-6 space-y-4">
+                <div>
+                  <label class="text-xs text-slate-400">Email</label>
+                  <input
+                    name="email"
+                    type="email"
+                    required
+                    class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+                    placeholder="email@exemplo.com"
+                  />
+                </div>
+                <div>
+                  <label class="text-xs text-slate-400">Senha</label>
+                  <input
+                    name="password"
+                    type="password"
+                    required
+                    class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+                    placeholder="********"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  class="w-full rounded-xl border border-cyan-400/40 bg-cyan-400/10 px-4 py-2 text-sm font-semibold text-cyan-200 transition hover:bg-cyan-400/20"
+                >
+                  Salvar conta
+                </button>
+              </form>
+            </div>
+
+            <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+              <div class="flex items-center justify-between gap-4">
+                <h2 class="text-lg font-semibold">Contas salvas</h2>
+                <span class="text-xs text-slate-400">Total: {{ accounts | length }}</span>
+              </div>
+              <div class="mt-6 flex max-h-[520px] flex-col gap-3 overflow-auto pr-1">
+                {% for account in accounts %}
+                  <div class="rounded-2xl border border-slate-800/70 bg-slate-950/60 p-3">
+                    <div class="flex items-start justify-between gap-3">
+                      <div>
+                        <div class="text-sm font-semibold text-white">{{ account.email }}</div>
+                        <div class="mt-1 text-xs text-slate-400">
+                          Status:
+                          <span class="rounded-full px-2 py-0.5 text-[11px] {{ 'bg-emerald-400/15 text-emerald-200' if account.status == 'activate' else 'bg-slate-700/40 text-slate-300' }}">
+                            {{ account.status }}
+                          </span>
+                        </div>
+                        <div class="mt-2 flex flex-wrap gap-2 text-[11px]">
+                          <span class="rounded-full border border-slate-700/60 px-2 py-0.5 text-slate-300">
+                            Ultimo login: {{ account.last_login or '--' }}
+                          </span>
+                        </div>
+                      </div>
+                      <div class="flex flex-col gap-2 text-xs">
+                        <form action="/accounts/{{ account.id_str }}/activate" method="post">
+                          <button
+                            type="submit"
+                            class="w-full rounded-lg border border-emerald-400/40 px-3 py-1 text-emerald-200 transition hover:bg-emerald-400/10 {{ 'opacity-50 cursor-not-allowed' if account.status in ('activate', 'activating') else '' }}"
+                            {% if account.status in ('activate', 'activating') %}disabled{% endif %}
+                          >
+                            Ativar
+                          </button>
+                        </form>
+                        <form action="/accounts/{{ account.id_str }}/delete" method="post">
+                          <button
+                            type="submit"
+                            class="w-full rounded-lg border border-rose-400/40 px-3 py-1 text-rose-200 transition hover:bg-rose-400/10"
+                          >
+                            Excluir
+                          </button>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+                {% else %}
+                  <div class="rounded-2xl border border-dashed border-slate-800/70 bg-slate-950/30 p-4 text-sm text-slate-400">
+                    Nenhuma conta cadastrada.
+                  </div>
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+        <aside class="space-y-4">
+          <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+            <div class="flex items-center justify-between">
+              <h2 class="text-lg font-semibold">Logs por conta</h2>
+              <div class="flex items-center gap-3 text-xs text-slate-400">
+                <button
+                  type="button"
+                  id="logs-clear-all"
+                  class="rounded-full border border-slate-700/70 bg-slate-900/60 px-3 py-1 text-[11px] font-semibold text-slate-200 transition hover:bg-slate-800"
+                >
+                  Limpar tudo
+                </button>
+              </div>
+            </div>
+            <div id="logs-panels" class="mt-4 grid gap-4">
+              {% for account in accounts %}
+                <div class="rounded-2xl border border-slate-800/70 bg-slate-950/60 p-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <div class="text-sm font-semibold text-white">log {{ loop.index }}</div>
+                    <div class="flex items-center gap-2 text-[11px] text-slate-400">
+                      <button
+                        type="button"
+                        data-log-clear="{{ account.id_str }}"
+                        class="rounded-full border border-slate-700/70 px-2 py-0.5 text-slate-200 transition hover:bg-slate-800"
+                      >
+                        Limpar
+                      </button>
+                      <span data-log-count="{{ account.id_str }}">0</span>
+                    </div>
+                  </div>
+                  <div
+                    data-log-panel="{{ account.id_str }}"
+                    class="mt-3 h-[260px] overflow-auto rounded-xl border border-slate-800/70 bg-slate-950/60 p-3 font-mono text-[11px] text-slate-200"
+                  >
+                    Carregando logs...
+                  </div>
+                </div>
+              {% else %}
+                <div class="rounded-2xl border border-dashed border-slate-800/70 bg-slate-950/30 p-4 text-sm text-slate-400">
+                  Nenhuma conta cadastrada.
+                </div>
+              {% endfor %}
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="tab-config" data-tab-panel class="hidden space-y-6">
+      <div class="grid gap-6 lg:grid-cols-[1.1fr,0.9fr]">
+        <div class="space-y-6">
+          <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+          <h2 class="text-lg font-semibold">Configuracao do bot</h2>
+          <p class="mt-2 text-sm text-slate-400">Defina os intervalos de envio, modo e mensagem padrão.</p>
+          <form action="/bot/settings" method="post" class="mt-6 space-y-4">
+            <div>
+              <label class="text-xs text-slate-400">Intervalo entre jogadores (segundos)</label>
+              <input
+                name="time_wait"
+                type="text"
+                inputmode="decimal"
+                value="{{ bot_state.settings.time_wait }}"
+                class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+              />
+            </div>
+            <div class="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white">
+              <input
+                id="headless"
+                name="headless"
+                type="checkbox"
+                value="1"
+                class="h-4 w-4 accent-emerald-400"
+                {% if bot_state.settings.headless %}checked{% endif %}
+              />
+              <label for="headless" class="text-slate-200">Modo headless (oculta o Chrome)</label>
+            </div>
+            <div>
+              <label class="text-xs text-slate-400">Espera depois do envio da mensagem (segundos)</label>
+              <input
+                name="post_send_wait"
+                type="text"
+                inputmode="decimal"
+                value="{{ bot_state.settings.post_send_wait }}"
+                class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+              />
+              <p class="mt-1 text-xs text-slate-500">Aceita ponto ou vírgula, por exemplo: 0.5 ou 0,5.</p>
+            </div>
+            <div class="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white">
+              <input
+                id="dry_run"
+                name="dry_run"
+                type="checkbox"
+                value="1"
+                class="h-4 w-4 accent-emerald-400"
+                {% if bot_state.settings.dry_run %}checked{% endif %}
+              />
+              <label for="dry_run" class="text-slate-200">Simular envio</label>
+            </div>
+            <div class="flex items-center gap-3 rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white">
+              <input
+                id="save_detailed_logs"
+                name="save_detailed_logs"
+                type="checkbox"
+                value="1"
+                class="h-4 w-4 accent-cyan-400"
+                {% if bot_state.settings.save_detailed_logs %}checked{% endif %}
+              />
+              <label for="save_detailed_logs" class="text-slate-200">Salvar log detalhado em data/log</label>
+            </div>
+            <div>
+              <label class="text-xs text-slate-400">Mensagem padrão</label>
+              <textarea
+                name="default_message"
+                rows="4"
+                class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+              >{{ default_message }}</textarea>
+            </div>
+            <button
+              type="submit"
+              class="w-full rounded-xl border border-indigo-400/40 bg-indigo-400/10 px-4 py-2 text-sm font-semibold text-indigo-200 transition hover:bg-indigo-400/20"
+            >
+              Salvar configurações
+            </button>
+          </form>
+          </div>
+
+          <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+            <h2 class="text-lg font-semibold">Mensagem por conta</h2>
+            <p class="mt-2 text-sm text-slate-400">Selecione uma conta e defina a mensagem individual.</p>
+
+            {% if accounts|length > 0 %}
+              <form action="/accounts/message" method="post" class="mt-6 space-y-4">
+                <div>
+                  <label class="text-xs text-slate-400">Conta</label>
+                  <select
+                    id="account-message-account"
+                    name="account_id"
+                    class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white"
+                  >
+                    {% for account in accounts %}
+                      {% if account.id_str %}
+                        <option value="{{ account.id_str }}">{{ account.email }}</option>
+                      {% endif %}
+                    {% endfor %}
+                  </select>
+                </div>
+                <div>
+                  <label class="text-xs text-slate-400">Mensagem</label>
+                  <textarea
+                    id="account-message-text"
+                    name="message"
+                    rows="4"
+                    class="mt-1 w-full rounded-xl border border-slate-800 bg-slate-950/60 px-3 py-2 text-sm text-white placeholder:text-slate-600"
+                  ></textarea>
+                </div>
+                <button
+                  type="submit"
+                  class="w-full rounded-xl border border-emerald-400/40 bg-emerald-400/10 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-400/20"
+                >
+                  Salvar mensagem da conta
+                </button>
+              </form>
+            {% else %}
+              <div class="mt-4 rounded-2xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200">
+                Cadastre pelo menos uma conta para configurar a mensagem individual.
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="rounded-3xl border border-slate-800/80 bg-slate-900/60 p-6 shadow-lg shadow-slate-950/40">
+          <h2 class="text-lg font-semibold">Resumo rápido</h2>
+          <div class="mt-6 space-y-4 text-sm text-slate-300">
+            <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+              <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Tempo</div>
+              <div class="mt-2 text-lg text-white">{{ bot_state.settings.time_wait }}s</div>
+            </div>
+            <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+              <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Headless</div>
+              <div class="mt-2 text-lg text-white">
+                {{ 'Ativo' if bot_state.settings.headless else 'Desativado' }}
+              </div>
+            </div>
+            <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+              <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Simular envio</div>
+              <div class="mt-2 text-lg text-white">
+                {{ 'Ativo' if bot_state.settings.dry_run else 'Desativado' }}
+              </div>
+            </div>
+            <div class="rounded-2xl border border-slate-800/80 bg-slate-950/60 p-4">
+              <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Mensagem</div>
+              <div class="mt-2 text-sm text-slate-200">{{ default_message }}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div
+    id="progress-floating"
+    class="fixed bottom-6 right-6 z-50 hidden w-80 rounded-2xl border border-slate-800/80 bg-slate-950/90 p-4 shadow-lg shadow-black/40 backdrop-blur"
+  >
+    <div class="flex items-center justify-between cursor-move select-none" id="progress-handle">
+      <div class="text-xs uppercase tracking-[0.3em] text-slate-500">Progresso</div>
+      <div id="progress-updated" class="text-[11px] text-slate-400">--</div>
+    </div>
+    <div id="progress-cards" class="mt-3 grid gap-3"></div>
+  </div>
+
+  <script>
+    const tabButtons = Array.from(document.querySelectorAll("[data-tab-target]"));
+    const tabPanels = Array.from(document.querySelectorAll("[data-tab-panel]"));
+
+    const activeClasses = ["bg-slate-950", "text-white", "shadow", "shadow-black/40"];
+    const inactiveClasses = ["text-slate-300", "hover:text-slate-100"];
+
+    const setActiveTab = (targetId) => {
+      tabPanels.forEach((panel) => {
+        panel.classList.toggle("hidden", panel.id !== targetId);
+      });
+
+      tabButtons.forEach((button) => {
+        const isActive = button.dataset.tabTarget === targetId;
+        activeClasses.forEach((cls) => button.classList.toggle(cls, isActive));
+        inactiveClasses.forEach((cls) => button.classList.toggle(cls, !isActive));
+      });
+    };
+
+    tabButtons.forEach((button) => {
+      button.addEventListener("click", () => setActiveTab(button.dataset.tabTarget));
+    });
+
+    setActiveTab("tab-main");
+
+    const logsPanels = Array.from(document.querySelectorAll("[data-log-panel]"));
+    const logsClearAll = document.getElementById("logs-clear-all");
+    const logsClearButtons = Array.from(document.querySelectorAll("[data-log-clear]"));
+    const progressFloating = document.getElementById("progress-floating");
+    const progressCards = document.getElementById("progress-cards");
+    const progressUpdated = document.getElementById("progress-updated");
+    const progressHandle = document.getElementById("progress-handle");
+    const serversSummary = document.getElementById("servers-summary");
+    const accountOrder = logsPanels.map((panel) => panel.dataset.logPanel);
+
+    let isDragging = false;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+
+    const setProgressPosition = (left, top) => {
+      if (!progressFloating) return;
+      const maxLeft = Math.max(0, window.innerWidth - progressFloating.offsetWidth);
+      const maxTop = Math.max(0, window.innerHeight - progressFloating.offsetHeight);
+      const clampedLeft = clamp(left, 0, maxLeft);
+      const clampedTop = clamp(top, 0, maxTop);
+      progressFloating.style.left = `${clampedLeft}px`;
+      progressFloating.style.top = `${clampedTop}px`;
+      progressFloating.style.right = "auto";
+      progressFloating.style.bottom = "auto";
+    };
+
+    const saveProgressPosition = (left, top) => {
+      try {
+        localStorage.setItem("progressFloatingPos", JSON.stringify({ left, top }));
+      } catch (error) {
+        // ignore
+      }
+    };
+
+    const loadProgressPosition = () => {
+      if (!progressFloating) return;
+      try {
+        const raw = localStorage.getItem("progressFloatingPos");
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        if (typeof data.left === "number" && typeof data.top === "number") {
+          setProgressPosition(data.left, data.top);
+        }
+      } catch (error) {
+        // ignore
+      }
+    };
+
+    const onDragStart = (event) => {
+      if (!progressFloating || !progressHandle) return;
+      isDragging = true;
+      const rect = progressFloating.getBoundingClientRect();
+      dragOffsetX = event.clientX - rect.left;
+      dragOffsetY = event.clientY - rect.top;
+    };
+
+    const onDragMove = (event) => {
+      if (!isDragging || !progressFloating) return;
+      const left = event.clientX - dragOffsetX;
+      const top = event.clientY - dragOffsetY;
+      setProgressPosition(left, top);
+    };
+
+    const onDragEnd = () => {
+      if (!isDragging || !progressFloating) return;
+      isDragging = false;
+      const rect = progressFloating.getBoundingClientRect();
+      saveProgressPosition(rect.left, rect.top);
+    };
+
+    const escapeHtml = (unsafe) =>
+      unsafe
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+
+    const renderLogs = (entries, panelEl, countEl) => {
+      if (!panelEl) return;
+      if (!entries.length) {
+        panelEl.innerHTML = "Nenhuma atividade ainda.";
+        if (countEl) countEl.textContent = "0";
+        return;
+      }
+
+      const rows = entries
+        .map((entry) => {
+          return `<div class="mb-1">${escapeHtml(entry.text)}</div>`;
+        })
+        .join("");
+
+      panelEl.innerHTML = rows;
+      if (countEl) countEl.textContent = String(entries.length);
+      panelEl.scrollTop = panelEl.scrollHeight;
+    };
+
+    const fetchAccountLogs = async (accountId, panelEl) => {
+      try {
+        const query = accountId ? `?account_id=${encodeURIComponent(accountId)}` : "";
+        const response = await fetch(`/logs${query}`);
+        if (!response.ok) return;
+        const data = await response.json();
+        const countEl = document.querySelector(`[data-log-count="${accountId}"]`);
+        renderLogs(data, panelEl, countEl);
+      } catch (error) {
+        // ignore
+      }
+    };
+
+    const fetchLogs = async () => {
+      await Promise.all(
+        logsPanels.map((panel) => {
+          const accountId = panel.dataset.logPanel;
+          return fetchAccountLogs(accountId, panel);
+        })
+      );
+    };
+
+    const getAccountLabel = (accountId, fallback) => {
+      const index = accountOrder.indexOf(accountId);
+      if (index >= 0) return `log ${index + 1}`;
+      if (fallback) return fallback;
+      return "log";
+    };
+
+    const renderServerSummary = (servers) => {
+      if (!serversSummary) return;
+      const rows = Array.isArray(servers) ? servers : [];
+      if (!rows.length) {
+        serversSummary.innerHTML = `<span class="text-slate-500">Nenhum servidor com envio ainda.</span>`;
+        return;
+      }
+      const html = rows
+        .map((item) => {
+          const label = item && item.server ? item.server : "--";
+          const sentRaw = Number(item && item.sent);
+          const sent = Number.isFinite(sentRaw) && sentRaw >= 0 ? Math.floor(sentRaw) : 0;
+          return `
+            <span class="inline-flex items-center gap-2 rounded-full border border-slate-700/60 px-2 py-0.5 text-slate-300">
+              <span>${escapeHtml(String(label))}</span>
+              <span class="rounded-full bg-slate-800/80 px-1.5 py-0.5 text-[10px] text-slate-200">${sent}</span>
+            </span>
+          `;
+        })
+        .join("");
+      serversSummary.innerHTML = html;
+    };
+
+	    const renderProgress = (payload) => {
+	      const servers = payload && Array.isArray(payload.servers) ? payload.servers : [];
+	      renderServerSummary(servers);
+	      if (!progressFloating || !progressCards) return;
+	      const accounts = Array.isArray(payload.accounts) ? payload.accounts : [];
+	      if (!servers.length) {
+	        progressFloating.classList.add("hidden");
+	        progressCards.innerHTML = "";
+	        if (progressUpdated) progressUpdated.textContent = "--";
+	        return;
+	      }
+
+	      progressFloating.classList.remove("hidden");
+	      loadProgressPosition();
+
+	      // Keep the same hierarchy as "Logs por conta": log 1, log 2, log 3...
+	      accounts.sort((a, b) => {
+	        const aId = String(a.account_id || "");
+	        const bId = String(b.account_id || "");
+	        const aIndex = accountOrder.indexOf(aId);
+	        const bIndex = accountOrder.indexOf(bId);
+	        const aRank = aIndex >= 0 ? aIndex : 9999;
+	        const bRank = bIndex >= 0 ? bIndex : 9999;
+	        if (aRank !== bRank) return aRank - bRank;
+	        return aId.localeCompare(bId);
+	      });
+
+	      const updatedTimes = [
+          ...accounts.map((item) => item.updated_at).filter(Boolean),
+          ...servers.map((item) => item.updated_at).filter(Boolean),
+        ];
+	      if (progressUpdated) {
+	        progressUpdated.textContent = updatedTimes.length ? `Atualizado: ${updatedTimes[updatedTimes.length - 1]}` : "--";
+	      }
+
+      const rows = servers
+        .map((item) => {
+          const totalRaw = Number(item.total);
+          const hasTotal = Number.isFinite(totalRaw) && totalRaw > 0;
+          const total = hasTotal ? Math.floor(totalRaw) : 0;
+          const sent = Number(item.sent || 0);
+          const remainingRaw = Number(item.remaining);
+          const remaining = hasTotal && Number.isFinite(remainingRaw) ? Math.floor(remainingRaw) : 0;
+          const percent =
+            typeof item.percent === "number" && Number.isFinite(Number(item.percent))
+              ? Number(item.percent)
+              : hasTotal
+                ? (sent / total) * 100
+                : 0;
+          const server = item.server || "--";
+          const activeBadge = item.active
+            ? `<span class="rounded-full bg-emerald-400/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-200">ativo</span>`
+            : "";
+          const progressText = hasTotal
+            ? `${sent}/${total} (${percent.toFixed(1)}%) - Faltam ${remaining}`
+            : `${sent} enviados`;
+
+          return `
+            <div class="rounded-2xl border border-slate-800/80 bg-slate-950/70 p-3">
+              <div class="flex items-center justify-between text-[11px] text-slate-400">
+                <span class="uppercase tracking-[0.25em]">Servidor</span>
+                <span>${escapeHtml(String(item.updated_at || "--"))}</span>
+              </div>
+              <div class="mt-2 flex items-center justify-between gap-2">
+                <div class="text-sm font-semibold text-white">Servidor: ${escapeHtml(String(server))}</div>
+                ${activeBadge}
+              </div>
+              <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+                <div class="h-2 rounded-full bg-emerald-400 transition-all" style="width: ${Math.max(
+                  0,
+                  Math.min(100, percent)
+                )}%"></div>
+              </div>
+              <div class="mt-2 text-xs text-slate-300">${progressText}</div>
+            </div>
+          `;
+        })
+        .join("");
+
+      progressCards.innerHTML = rows;
+    };
+
+    const fetchProgress = async () => {
+      try {
+        const response = await fetch("/progress");
+        if (!response.ok) return;
+        const data = await response.json();
+        renderProgress(data);
+      } catch (error) {
+        // ignore
+      }
+    };
+
+    if (logsClearAll) {
+      logsClearAll.addEventListener("click", async () => {
+        try {
+          await fetch("/logs/clear", { method: "POST" });
+          logsPanels.forEach((panel) => renderLogs([], panel, null));
+        } catch (error) {
+          // ignore
+        }
+      });
+    }
+
+    logsClearButtons.forEach((button) => {
+      button.addEventListener("click", async () => {
+        const accountId = button.dataset.logClear;
+        if (!accountId) return;
+        try {
+          await fetch(`/logs/clear?account_id=${encodeURIComponent(accountId)}`, { method: "POST" });
+          const panel = document.querySelector(`[data-log-panel="${accountId}"]`);
+          renderLogs([], panel, document.querySelector(`[data-log-count="${accountId}"]`));
+        } catch (error) {
+          // ignore
+        }
+      });
+    });
+
+    if (progressHandle) {
+      progressHandle.addEventListener("mousedown", onDragStart);
+      document.addEventListener("mousemove", onDragMove);
+      document.addEventListener("mouseup", onDragEnd);
+    }
+
+    window.addEventListener("resize", () => {
+      if (!progressFloating) return;
+      const rect = progressFloating.getBoundingClientRect();
+      setProgressPosition(rect.left, rect.top);
+    });
+
+    const accountMessageSelect = document.getElementById("account-message-account");
+    const accountMessageText = document.getElementById("account-message-text");
+    const accountMessageMap = {{ account_message_map|tojson }};
+
+    const syncAccountMessage = () => {
+      if (!accountMessageSelect || !accountMessageText) return;
+      const key = String(accountMessageSelect.value || "");
+      const value = accountMessageMap && Object.prototype.hasOwnProperty.call(accountMessageMap, key) ? accountMessageMap[key] : "";
+      accountMessageText.value = typeof value === "string" ? value : value ? String(value) : "";
+    };
+
+    if (accountMessageSelect && accountMessageText) {
+      accountMessageSelect.addEventListener("change", syncAccountMessage);
+      syncAccountMessage();
+    }
+
+    fetchLogs();
+    fetchProgress();
+    setInterval(fetchLogs, 2000);
+    setInterval(fetchProgress, 1000);
+  </script>
+{% endblock %}

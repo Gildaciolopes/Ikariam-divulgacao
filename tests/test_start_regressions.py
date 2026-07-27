@@ -176,7 +176,9 @@ def test_send_message_dry_run_prepares_message_and_does_not_click_submit():
     assert returned == [("main", "message")]
 
 
-def test_real_send_returns_immediately_after_click_without_post_checks():
+def test_real_send_detects_cooldown_after_click_instead_of_counting():
+    # Regressao do BUG 1: apos o clique a verificacao real volta a rodar na aba de
+    # mensagem. Um cooldown/rate-limit e detectado e NAO contado como envio.
     bot = BotDriver.__new__(BotDriver)
     driver = FakeMessageDriver()
     text_area = FakeTextArea()
@@ -201,16 +203,43 @@ def test_real_send_returns_immediately_after_click_without_post_checks():
     bot._sleep = lambda seconds: None
     bot._install_send_trace = lambda: None
     bot._return_to_main_tab = lambda main_tab, message_tab: returned.append((main_tab, message_tab))
-    bot._find_feedback = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("nao deve verificar feedback"))
-    bot._detect_cooldown_message = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("nao deve verificar cooldown"))
-    bot._page_has_outbox_sent = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("nao deve verificar Outbox"))
+    bot._read_send_diagnostics = lambda: None
+    bot._find_feedback = lambda xpaths, timeout: None
+    bot._page_has_outbox_sent = lambda *args, **kwargs: False
+    bot._detect_cooldown_message = lambda timeout=3.0, check_handles=None: "Tem de esperar 30 segundos antes de enviar."
+
+    status, feedback, cooldown = bot._sendMessage("Player One", "https://example.test/message")
+
+    assert status == "cooldown"
+    assert cooldown == 30
+    assert submit_button.clicked is True
+    assert returned == [("main", "message")]
+
+
+def test_real_send_confirms_success_only_with_real_feedback():
+    # Feedback de sucesso real ("Sua ordem foi executada") => status "success".
+    bot = BotDriver.__new__(BotDriver)
+    driver = FakeMessageDriver()
+    returned = []
+    bot.driver = driver
+    bot.account = SimpleNamespace(message="Texto de teste")
+    bot.main_tab_handle = "main"
+    bot.message_tab_handle = "message"
+    bot.dry_run = False
+    bot._check_stop = lambda: None
+    bot._ensure_message_tab = lambda: "message"
+    bot._find_or_wait = lambda by, selector, **kwargs: FakeTextArea() if selector == "js_msgTextConfirm" else FakeSubmitButton()
+    bot._sleep = lambda seconds: None
+    bot._install_send_trace = lambda: None
+    bot._return_to_main_tab = lambda main_tab, message_tab: returned.append((main_tab, message_tab))
+    bot._read_send_diagnostics = lambda: None
+    bot._page_has_outbox_sent = lambda *args, **kwargs: False
+    bot._find_feedback = lambda xpaths, timeout: "Sua ordem foi executada"
 
     status, feedback, cooldown = bot._sendMessage("Player One", "https://example.test/message")
 
     assert status == "success"
-    assert feedback == "Mensagem enviada; seguindo sem verificacao posterior."
     assert cooldown is None
-    assert submit_button.clicked is True
     assert returned == [("main", "message")]
 
 
@@ -230,10 +259,17 @@ def test_real_send_waits_configured_decimal_after_click():
     bot._sleep = lambda seconds: sleeps.append(seconds)
     bot._install_send_trace = lambda: None
     bot._return_to_main_tab = lambda main_tab, message_tab: None
+    bot._read_send_diagnostics = lambda: None
+    bot._find_feedback = lambda xpaths, timeout: None
+    bot._page_has_outbox_sent = lambda *args, **kwargs: False
+    bot._detect_cooldown_message = lambda timeout=3.0, check_handles=None: None
 
-    bot._sendMessage("Player One", "https://example.test/message")
+    status, feedback, cooldown = bot._sendMessage("Player One", "https://example.test/message")
 
-    assert sleeps[-1] == 0.1
+    # Sem confirmacao e sem rejeicao explicita => "allowed" (otimista), e o
+    # tempo configurado pos-envio foi respeitado.
+    assert status == "allowed"
+    assert 0.1 in sleeps
 
 
 def test_unknown_server_total_does_not_complete_before_capture(monkeypatch):
@@ -931,19 +967,25 @@ def test_profile_process_cleanup_runs_powershell_without_console_window(monkeypa
     assert calls[0][1]["stderr"] == start_module.subprocess.DEVNULL
 
 
-def test_start_game_skips_server_after_unexpected_flow_error():
+def test_start_game_retries_transient_flow_error_before_skipping_server():
+    # Regressao do BUG 2: erro transitorio no fluxo NAO marca o servidor como
+    # concluido de imediato. Ele e retentado ate SERVER_TRANSIENT_RETRY_LIMIT e so
+    # entao e pulado, sem tratar falha efemera como estado terminal.
     bot = BotDriver.__new__(BotDriver)
     logs = FakeLogs()
-    entered = []
+    flow_calls = []
     closed = []
 
     def enter_server(logger, exclude_servers=None):
-        if entered:
+        if "Pangaia 2" in (exclude_servers or set()):
             return None
-        entered.append(tuple(sorted(exclude_servers or [])))
         bot.serverGlobal = FakeServer(users=100)
         bot.serverGlobal.server = "Pangaia 2"
         return "Pangaia 2"
+
+    def flow(logger):
+        flow_calls.append(1)
+        raise RuntimeError("ranking travado")
 
     bot.logs = logs
     bot.serverGlobal = None
@@ -954,15 +996,60 @@ def test_start_game_skips_server_after_unexpected_flow_error():
     bot._login_to_lobby = lambda logger: True
     bot._enter_server_from_accounts = enter_server
     bot._enter_default_server_from_lobby = lambda logger: None
-    bot._run_current_server_flow = lambda logger: (_ for _ in ()).throw(RuntimeError("ranking travado"))
+    bot._run_current_server_flow = flow
     bot._close_extra_windows = lambda keep: closed.append(set(keep))
     bot._sleep = lambda seconds: None
 
     bot.StartGame(logs)
 
-    assert entered == [()]
-    assert closed == [{"main", None}]
-    assert any("Servidor Pangaia 2 apresentou erro e sera pulado" in line for line in logs.lines)
+    # Retentado exatamente ate o limite antes de desistir do servidor.
+    assert len(flow_calls) == start_module.SERVER_TRANSIENT_RETRY_LIMIT
+    assert any("erro transitorio (1/3) e sera retentado" in line for line in logs.lines)
+    assert any("falhou 3 vezes seguidas e sera pulado" in line for line in logs.lines)
+
+
+def test_start_game_resumes_after_flow_cooldown_instead_of_ending_account():
+    # Regressao do BUG 2: BotCooldown no fluxo faz o bot dormir e RETOMAR o envio,
+    # em vez de deixar StartGame retornar e encerrar a conta.
+    bot = BotDriver.__new__(BotDriver)
+    logs = FakeLogs()
+    flow_calls = []
+    sleeps = []
+
+    def enter_server(logger, exclude_servers=None):
+        if "Pangaia 2" in (exclude_servers or set()):
+            return None
+        bot.serverGlobal = FakeServer(users=100)
+        bot.serverGlobal.server = "Pangaia 2"
+        return "Pangaia 2"
+
+    def flow(logger):
+        flow_calls.append(1)
+        if len(flow_calls) == 1:
+            raise start_module.BotCooldown(wait_seconds=45)
+        # Segunda visita: nada novo para enviar (esgotado) -> conclui o servidor.
+        return True, False, False
+
+    bot.logs = logs
+    bot.serverGlobal = None
+    bot.message_tab_handle = None
+    bot.main_tab_handle = "main"
+    bot._stale_recovery_count = 0
+    bot._check_stop = lambda: None
+    bot._is_stopped = lambda: False
+    bot._login_to_lobby = lambda logger: True
+    bot._enter_server_from_accounts = enter_server
+    bot._enter_default_server_from_lobby = lambda logger: None
+    bot._run_current_server_flow = flow
+    bot._close_extra_windows = lambda keep: None
+    bot._sleep = lambda seconds: sleeps.append(seconds)
+
+    bot.StartGame(logs)
+
+    # Dormiu o cooldown e voltou a rodar o fluxo (nao encerrou apos o cooldown).
+    assert 45 in sleeps
+    assert len(flow_calls) == 2
+    assert any("Cooldown no servidor Pangaia 2" in line for line in logs.lines)
 
 
 def test_start_game_stops_after_repeated_server_selection_errors():

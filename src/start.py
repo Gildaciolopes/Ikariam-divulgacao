@@ -41,6 +41,7 @@ IGNORE_FEEDBACK_TIMEOUT_SECONDS = 0.5
 SERVER_SEND_BATCH_LIMIT = 25
 ACTIVATION_WAIT_SECONDS = 300.0
 STALE_ELEMENT_RECOVERY_LIMIT = 3
+SERVER_TRANSIENT_RETRY_LIMIT = 3
 DRIVER_IDLE_TIMEOUT_SECONDS = float(os.getenv("BOT_DRIVER_IDLE_TIMEOUT", "150"))
 LOBBY_URL = "https://lobby.ikariam.gameforge.com/pt_BR/"
 ACCOUNTS_URL = "https://lobby.ikariam.gameforge.com/pt_BR/accounts"
@@ -2016,12 +2017,25 @@ class BotDriver:
                 raise TimeoutException("lobby login was not available")
             completed_servers: set[str] = set()
             current_round_servers: set[str] = set()
+            transient_failures: dict[str, int] = {}
             selection_failures = 0
+            progress_this_round = False
             while not self._is_stopped():
                 try:
                     excluded_servers = completed_servers | current_round_servers
                     next_server = self._enter_server_from_accounts(logger, exclude_servers=excluded_servers)
                     if not next_server and current_round_servers:
+                        # Fim de uma volta completa: so reinicia a rotacao circular se
+                        # a rodada anterior enviou algo. Rodada inteira sem envios =
+                        # nada restante (ou tudo transitoriamente travado) -> encerra.
+                        if not progress_this_round:
+                            if logger:
+                                logger.addLogs(
+                                    "Rodada completa sem novos envios. Todos os servidores cobertos ou sem alvos disponiveis.",
+                                    "info",
+                                )
+                            break
+                        progress_this_round = False
                         current_round_servers.clear()
                         next_server = self._enter_server_from_accounts(logger, exclude_servers=completed_servers)
                     if not next_server:
@@ -2054,22 +2068,52 @@ class BotDriver:
                 self._server_cycle_send_count = 0
                 try:
                     completed, sent_any, batch_exhausted = self._run_current_server_flow(logger)
-                except (BotCooldown, BotStopped):
+                except BotStopped:
                     raise
-                except Exception as error:
+                except BotCooldown as cooldown:
+                    # Cooldown e transitorio: dorme e RETOMA a rotacao (retenta o mesmo
+                    # servidor) em vez de deixar StartGame retornar, o que encerraria a
+                    # conta de vez.
                     if logger:
                         logger.addLogs(
-                            f"Servidor {current_server} apresentou erro e sera pulado. Erro: {type(error).__name__}: {_error_summary(error)}",
+                            f"Cooldown no servidor {current_server}. Aguardando {cooldown.wait_seconds}s e retomando a rotacao.",
                             "warn",
                         )
+                    self._sleep(cooldown.wait_seconds)
+                    self._stale_recovery_count = 0
+                    continue
+                except Exception as error:
+                    # Erro transitorio (timeout, rede, popup, stale...): retenta o mesmo
+                    # servidor com limite; so marca como concluido depois de esgotar o
+                    # limite, evitando tratar falha efemera como estado terminal.
+                    count = transient_failures.get(current_server, 0) + 1
+                    transient_failures[current_server] = count
                     try:
                         self._close_extra_windows({self.main_tab_handle, self.message_tab_handle})
                     except Exception:
                         pass
-                    completed_servers.add(current_server)
+                    if count >= SERVER_TRANSIENT_RETRY_LIMIT:
+                        if logger:
+                            logger.addLogs(
+                                f"Servidor {current_server} falhou {count} vezes seguidas e sera pulado. Erro: {type(error).__name__}: {_error_summary(error)}",
+                                "warn",
+                            )
+                        if current_server:
+                            completed_servers.add(current_server)
+                    else:
+                        if logger:
+                            logger.addLogs(
+                                f"Servidor {current_server} apresentou erro transitorio ({count}/{SERVER_TRANSIENT_RETRY_LIMIT}) e sera retentado. Erro: {type(error).__name__}: {_error_summary(error)}",
+                                "warn",
+                            )
                     continue
+                if sent_any:
+                    progress_this_round = True
+                    self._stale_recovery_count = 0
+                    transient_failures.pop(current_server, None)
                 if completed and current_server:
                     completed_servers.add(current_server)
+                    transient_failures.pop(current_server, None)
                 if current_server:
                     current_round_servers.add(current_server)
                 if batch_exhausted and logger:
@@ -2077,8 +2121,6 @@ class BotDriver:
                         f"Lote de {_server_send_batch_limit()} mensagens concluido em {current_server}. Alternando conta/servidor.",
                         "info",
                     )
-                if not sent_any and not completed and current_server:
-                    completed_servers.add(current_server)
         except BotCooldown as cooldown:
             if logger:
                 logger.addLogs(f"Cooldown detectado. Aguardando {cooldown.wait_seconds}s.", "warn")
@@ -2907,9 +2949,10 @@ class BotDriver:
             self._sleep(CLICK_DELAY_SECONDS)
         except Exception:
             self._click(submit_button)
-        self._return_to_main_tab(main_tab, message_tab)
+        # Verificacao roda na aba de mensagem (onde o jogo renderiza o resultado do
+        # envio) ANTES de voltar para a aba principal. So contamos como enviado quando
+        # ha confirmacao real; cooldown/rate-limit/lista de ignorados nao contam.
         self._sleep(getattr(self, "postSendWait", 1.0))
-        return "success", "Mensagem enviada; seguindo sem verificacao posterior.", None
 
         if _send_diagnostics_enabled():
             self._sleep(0.75)

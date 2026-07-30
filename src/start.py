@@ -2451,6 +2451,19 @@ class BotDriver:
                 cycle_total=int(getattr(self, "_server_cycle_send_count", 0)),
                 **_audit_database_counts(textLogs, server_global),
             )
+            if textLogs:
+                cs = getattr(self, "_last_capture_state", {})
+                gap = int(cs.get("skipped_confirmed", 0)) + int(cs.get("ignored", 0)) + int(cs.get("unmessageable", 0))
+                if gap:
+                    textLogs.addLogs(
+                        f"Resumo {option_text}: {int(cs.get('sent_now', 0))} enviados | "
+                        f"{int(cs.get('skipped_confirmed', 0))} ja no banco | "
+                        f"{int(cs.get('ignored', 0))} lista de ignorados | "
+                        f"{int(cs.get('unmessageable', 0))} sem botao (proprio/aliado/inativo) | "
+                        f"{int(cs.get('cooldown_hit', 0))} cooldown | {int(cs.get('row_errors', 0))} linhas invalidas. "
+                        f"Nao ha jogadores messageable pulados.",
+                        "info",
+                    )
             sent_any_total = sent_any_total or sent_any
             batch_exhausted_total = batch_exhausted_total or batch_exhausted
             if completed:
@@ -2533,6 +2546,10 @@ class BotDriver:
             "row_errors": 0,
             "skipped_confirmed": 0,
             "skipped_pending": 0,
+            "unmessageable": 0,
+            "ignored": 0,
+            "cooldown_hit": 0,
+            "sent_now": 0,
         }
         try:
             users = self._find_all_or_wait(By.XPATH, '//*[@id="tab_highscore"]/div[1]/table/tbody/tr', timeout=10)
@@ -2623,6 +2640,11 @@ class BotDriver:
                 self._last_capture_state["row_errors"] += 1
                 continue
         self._last_capture_state["targets"] = len(targets)
+        # Linhas varridas que nao viraram alvo nem erro = jogadores sem botao de
+        # mensagem (proprio/aliado/inativo). Explica o "gap" posicao vs enviadas.
+        self._last_capture_state["unmessageable"] = max(
+            len(users) - len(targets) - self._last_capture_state["row_errors"], 0
+        )
         _audit(
             textLogs,
             "ranking_targets_prepared",
@@ -2728,6 +2750,7 @@ class BotDriver:
                             return False, sent_any, True
                         continue
                     UsersSend.update_status(reservation.id_str, "cooldown")
+                    self._last_capture_state["cooldown_hit"] += 1
                     raise BotCooldown(wait_seconds=cooldown_seconds or 60)
                 if status_send == "success":
                     self._mark_sent(reservation.id_str, user_name, textLogs)
@@ -2741,6 +2764,7 @@ class BotDriver:
                     continue
                 if status_send == "ignore list":
                     UsersSend.update_status(reservation.id_str, "ignored")
+                    self._last_capture_state["ignored"] += 1
             except (NoSuchElementException, TimeoutException):
                 continue
         return False, sent_any, False
@@ -2763,6 +2787,8 @@ class BotDriver:
         self.messageSendCount += 1
         self.totalSentSession += 1
         self._server_cycle_send_count += 1
+        if isinstance(getattr(self, "_last_capture_state", None), dict):
+            self._last_capture_state["sent_now"] = self._last_capture_state.get("sent_now", 0) + 1
         _audit(
             textLogs,
             "player_marked_sent",

@@ -229,6 +229,10 @@ def _cached_chromedriver_path() -> str | None:
         matching = [path for path in drivers if any(part.startswith(f"{chrome_major}.") for part in path.parts)]
         if matching:
             return str(sorted(matching, key=version_key, reverse=True)[0])
+        # Chrome atualizou e nao ha driver em cache para esta versao. NAO reutilizar
+        # um driver de outra versao (gera SessionNotCreatedException "only supports
+        # Chrome version N"). Retornar None forca o download do driver correto.
+        return None
     return str(sorted(drivers, key=version_key, reverse=True)[0])
 
 
@@ -249,6 +253,27 @@ def _resolve_chromedriver_path(installed_path: str) -> str:
                 return str(candidate)
 
     raise FileNotFoundError(f"chromedriver.exe nao encontrado a partir de: {installed_path}")
+
+
+def _resolve_chromedriver(force_download: bool = False) -> str:
+    """Caminho do chromedriver. force_download ignora o cache e baixa o driver
+    compativel com o Chrome instalado (usado quando o Chrome atualiza)."""
+    if not force_download:
+        cached = _cached_chromedriver_path()
+        if cached:
+            return cached
+    return _resolve_chromedriver_path(ChromeDriverManager().install())
+
+
+def _is_driver_version_mismatch(error: Exception) -> bool:
+    message = str(error).lower()
+    if "session not created" not in message:
+        return False
+    return (
+        "only supports chrome version" in message
+        or "this version of chromedriver" in message
+        or "chromedriver only supports" in message
+    )
 
 
 def _is_profile_lock_error(error: Exception) -> bool:
@@ -469,14 +494,25 @@ class BotDriver:
             self._profile_dir = _make_temp_profile_dir()
             self._temp_profile_dir = self._profile_dir
         options = _build_chrome_options(self.headless, self._profile_dir)
-        driver_path = _cached_chromedriver_path() or _resolve_chromedriver_path(ChromeDriverManager().install())
+        driver_path = _resolve_chromedriver()
         try:
             driver = webdriver.Chrome(service=_build_chromedriver_service(driver_path), options=options)
         except SessionNotCreatedException as error:
-            if not self._persistent_profile or not _is_profile_lock_error(error):
+            if _is_driver_version_mismatch(error):
+                # Chrome atualizou e o chromedriver em cache ficou incompativel.
+                # Baixa o driver correto (ignorando o cache) e tenta novamente.
+                if self.logs:
+                    self.logs.addLogs(
+                        "Chrome atualizou; baixando o ChromeDriver compativel e tentando novamente.",
+                        "warn",
+                    )
+                fresh_path = _resolve_chromedriver(force_download=True)
+                driver = webdriver.Chrome(service=_build_chromedriver_service(fresh_path), options=options)
+            elif self._persistent_profile and _is_profile_lock_error(error):
+                _terminate_chrome_profile_processes(self._profile_dir)
+                driver = webdriver.Chrome(service=_build_chromedriver_service(driver_path), options=options)
+            else:
                 raise
-            _terminate_chrome_profile_processes(self._profile_dir)
-            driver = webdriver.Chrome(service=_build_chromedriver_service(driver_path), options=options)
         driver.set_page_load_timeout(60)
         driver.set_script_timeout(20)
         return driver

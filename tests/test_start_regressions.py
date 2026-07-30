@@ -947,6 +947,31 @@ def test_cached_chromedriver_prefers_installed_chrome_major(monkeypatch, tmp_pat
     assert start_module._cached_chromedriver_path() == str(current_driver)
 
 
+def test_cached_chromedriver_ignored_when_chrome_updated_past_cache(monkeypatch, tmp_path):
+    # Regressao: Chrome atualizou p/ 150 mas so ha driver 148/149 em cache.
+    # Nao pode devolver driver de outra versao (gera SessionNotCreatedException);
+    # deve retornar None p/ forcar o download do driver correto.
+    for version in ("148.0.1.1", "149.0.7827.155"):
+        driver = tmp_path / ".wdm" / "drivers" / "chromedriver" / "win64" / version / "chromedriver-win32" / "chromedriver.exe"
+        driver.parent.mkdir(parents=True)
+        driver.write_text(version)
+    monkeypatch.setattr(start_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(start_module, "_installed_chrome_major", lambda: "150")
+
+    assert start_module._cached_chromedriver_path() is None
+
+
+def test_driver_version_mismatch_detection():
+    mismatch = start_module.SessionNotCreatedException(
+        "session not created: This version of ChromeDriver only supports Chrome version 149"
+    )
+    assert start_module._is_driver_version_mismatch(mismatch) is True
+    lock = start_module.SessionNotCreatedException(
+        "session not created: probably user data directory is already in use"
+    )
+    assert start_module._is_driver_version_mismatch(lock) is False
+
+
 def test_profile_process_cleanup_runs_powershell_without_console_window(monkeypatch, tmp_path):
     calls = []
 

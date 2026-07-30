@@ -209,7 +209,7 @@ def test_empty_outbox_snapshot_never_releases_registered_user(tmp_path):
     assert output.splitlines() == ["0", "False"]
 
 
-def test_failed_and_unconfirmed_users_are_never_reserved_again(tmp_path):
+def test_cooldown_and_failed_are_retried_after_wait_but_terminal_status_is_not(tmp_path):
     appdata = tmp_path / "appdata"
     cwd = tmp_path / "launch-dir"
     cwd.mkdir()
@@ -217,23 +217,32 @@ def test_failed_and_unconfirmed_users_are_never_reserved_again(tmp_path):
     output = run_storage_script(
         "\n".join(
             [
+                "import time",
                 "from src.storage import UsersSend, init_db",
                 "init_db()",
-                "first = UsersSend.reserve(server_id='server-1', username='Failed Player', account_id='account-1')",
-                "UsersSend.update_status(first.id, 'failed')",
-                "retry_failed = UsersSend.reserve(server_id='server-1', username='Failed Player', account_id='account-1')",
-                "print(retry_failed is None)",
-                "second = UsersSend.reserve(server_id='server-1', username='Unconfirmed Player', account_id='account-1')",
-                "UsersSend.update_status(second.id, 'unconfirmed')",
-                "retry_unconfirmed = UsersSend.reserve(server_id='server-1', username='Unconfirmed Player', account_id='account-1')",
-                "print(retry_unconfirmed is None)",
+                # failed sem retry_at (espera ja vencida) -> re-habilita para nova tentativa
+                "f = UsersSend.reserve(server_id='server-1', username='Failed Player', account_id='account-1')",
+                "UsersSend.update_status(f.id, 'failed')",
+                "print(UsersSend.reserve(server_id='server-1', username='Failed Player', account_id='account-1') is not None)",
+                # cooldown com retry_at no futuro -> ainda NAO deve ser re-tentado
+                "c = UsersSend.reserve(server_id='server-1', username='Cooldown Wait', account_id='account-1')",
+                "UsersSend.update_status(c.id, 'cooldown', time.time() + 9999)",
+                "print(UsersSend.reserve(server_id='server-1', username='Cooldown Wait', account_id='account-1') is None)",
+                # cooldown com retry_at vencido -> re-habilita
+                "c2 = UsersSend.reserve(server_id='server-1', username='Cooldown Ready', account_id='account-1')",
+                "UsersSend.update_status(c2.id, 'cooldown', time.time() - 1)",
+                "print(UsersSend.reserve(server_id='server-1', username='Cooldown Ready', account_id='account-1') is not None)",
+                # status terminal (sent) nunca e re-tentado
+                "s = UsersSend.reserve(server_id='server-1', username='Sent Player', account_id='account-1')",
+                "UsersSend.update_status(s.id, 'sent')",
+                "print(UsersSend.reserve(server_id='server-1', username='Sent Player', account_id='account-1') is None)",
             ]
         ),
         appdata=appdata,
         cwd=cwd,
     )
 
-    assert output.splitlines() == ["True", "True"]
+    assert output.splitlines() == ["True", "True", "True", "True"]
 
 
 def test_reservation_is_never_reused_even_after_ttl_or_account_change(tmp_path):

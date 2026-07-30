@@ -42,6 +42,12 @@ SERVER_SEND_BATCH_LIMIT = 25
 ACTIVATION_WAIT_SECONDS = 300.0
 STALE_ELEMENT_RECOVERY_LIMIT = 3
 SERVER_TRANSIENT_RETRY_LIMIT = 3
+COOLDOWN_MIN_RETRY_SECONDS = 60
+FAILED_RETRY_BACKOFF_SECONDS = 300
+# Margem de seguranca (em posicoes do ranking) ao retomar por faixas: garante que
+# a faixa da fronteira seja sempre re-varrida, para nao pular quem subiu de rank.
+RESUME_SAFETY_MARGIN = 50
+OUTBOX_SYNC_RETRY_ATTEMPTS = 3
 DRIVER_IDLE_TIMEOUT_SECONDS = float(os.getenv("BOT_DRIVER_IDLE_TIMEOUT", "150"))
 LOBBY_URL = "https://lobby.ikariam.gameforge.com/pt_BR/"
 ACCOUNTS_URL = "https://lobby.ikariam.gameforge.com/pt_BR/accounts"
@@ -893,6 +899,71 @@ class BotDriver:
             self._sleep(MESSAGE_TEXT_SETTLE_SECONDS)
         return []
 
+    def _collect_outbox_recipients(self, textLogs: LogSink | None = None, page_cap: int = 400) -> list[str]:
+        """Abre a Outbox e coleta os NOMES dos destinatarios ao longo das paginas."""
+        try:
+            origin_url = self.driver.current_url or ""
+        except Exception:
+            origin_url = ""
+        if not self._open_outbox_page_robust():
+            return []
+        names: list[str] = []
+        seen_keys: set[str] = set()
+        for _ in range(page_cap):
+            for name in self._extract_current_outbox_recipients():
+                key = self._outbox_recipient_key(name)
+                if key and key not in seen_keys:
+                    seen_keys.add(key)
+                    names.append(name)
+            if not self._click_next_outbox_page():
+                break
+        try:
+            if origin_url and (self.driver.current_url or "") != origin_url:
+                self.driver.get(origin_url)
+        except Exception:
+            pass
+        return names
+
+    def _maybe_import_outbox_recipients(self, textLogs: LogSink | None = None) -> None:
+        """Bootstrap de retomada: se o banco local esta VAZIO para este servidor mas a
+        conta ja tem Outbox, importa os destinatarios reais por NOME. Assim, mesmo com
+        um .exe/banco novo, o bot retoma 'de onde parou' e nao re-manda quem ja recebeu.
+        Roda no maximo uma vez por servidor por sessao e nunca quebra o fluxo.
+        """
+        server_global = getattr(self, "serverGlobal", None)
+        if not server_global:
+            return
+        server_id = server_global.id
+        seen = getattr(self, "_bootstrapped_outbox_servers", None)
+        if seen is None:
+            seen = set()
+            self._bootstrapped_outbox_servers = seen
+        if server_id in seen:
+            return
+        seen.add(server_id)
+        try:
+            if UsersSend.count_for_server(server_id=server_id) > 0:
+                return  # ja ha historico local; dedup por nome cuida do resto
+            names = self._collect_outbox_recipients(textLogs)
+            if not names:
+                return
+            imported = UsersSend.replace_server_outbox_snapshot(
+                server_id=server_id,
+                usernames=names,
+                account_id=self.account.id if getattr(self, "account", None) else None,
+            )
+            if int(server_global.messageSend or 0) < imported:
+                server_global.messageSend = imported
+                server_global.save()
+            if textLogs and imported:
+                textLogs.addLogs(
+                    f"Retomada pela Outbox: {imported} destinatarios ja enviados importados do jogo "
+                    f"(o bot continua de onde parou, sem repetir).",
+                    "info",
+                )
+        except Exception:
+            return
+
     def _count_current_outbox_messages(self, attempts: int = 3) -> int:
         for attempt in range(attempts):
             try:
@@ -1208,13 +1279,20 @@ class BotDriver:
             origin_url = ""
         try:
             if not self._open_outbox_page_robust():
+                attempts = list(getattr(self, "_last_outbox_open_attempts", []))
+                current_route = self._safe_outbox_route(getattr(self.driver, "current_url", "") or "")
                 if textLogs:
-                    textLogs.addLogs("Nao foi possivel sincronizar Outbox: link/rota nao encontrada.", "warn")
+                    textLogs.addLogs(
+                        "Nao foi possivel sincronizar Outbox: link/rota nao encontrada. "
+                        f"URL atual: {current_route}. Rotas tentadas: "
+                        f"{', '.join(attempts) if attempts else 'nenhuma'}.",
+                        "warn",
+                    )
                 _audit(
                     textLogs,
                     "outbox_open_failed",
-                    attempts=list(getattr(self, "_last_outbox_open_attempts", [])),
-                    current_route=self._safe_outbox_route(getattr(self.driver, "current_url", "") or ""),
+                    attempts=attempts,
+                    current_route=current_route,
                 )
                 return None
             try:
@@ -2381,7 +2459,17 @@ class BotDriver:
         self.driver.switch_to.window(main_handle)
         self._close_extra_windows({self.main_tab_handle, self.message_tab_handle})
         self._click_game_start_if_present(textLogs)
-        outbox_total = self._sync_outbox_sent_users(textLogs)
+        # Resiliencia a cold-start: logo apos ativar/entrar no servidor, a pagina pode
+        # ainda estar carregando e a rota da Outbox nao ser reconhecida. Re-tenta a
+        # sincronizacao algumas vezes antes de cair para o progresso local.
+        outbox_total = None
+        for sync_attempt in range(1, OUTBOX_SYNC_RETRY_ATTEMPTS + 1):
+            last_attempt = sync_attempt == OUTBOX_SYNC_RETRY_ATTEMPTS
+            outbox_total = self._sync_outbox_sent_users(textLogs if last_attempt else None)
+            if outbox_total is not None:
+                break
+            if not last_attempt:
+                self._sleep(SHORT_WAIT_SECONDS * 2)
         if outbox_total is None:
             if textLogs:
                 textLogs.addLogs(
@@ -2389,6 +2477,9 @@ class BotDriver:
                     "warn",
                 )
             outbox_total = int(server_global.messageSend or 0) if server_global else 0
+        # Banco vazio para este servidor (ex.: .exe novo)? Importa os destinatarios ja
+        # enviados direto da Outbox do jogo, por NOME, para retomar de onde parou.
+        self._maybe_import_outbox_recipients(textLogs)
         _audit(
             textLogs,
             "server_resume_synchronized",
@@ -2400,7 +2491,15 @@ class BotDriver:
         highscore_link = self._open_highscore_page()
         self._sleep(SHORT_WAIT_SECONDS)
         discovered_option_texts = self._get_highscore_options(attempts=3, delay=1.5, reopen=highscore_link)
-        resume_total = int(server_global.messageSend or 0) if server_global else int(outbox_total or 0)
+        # Retoma por POSICOES ja processadas no banco (qualquer status: enviado,
+        # cooldown, ignorado, falha), com margem de seguranca, em vez de pelo contador
+        # de enviados. Assim faixas ja cobertas sao puladas para performance, mas a
+        # faixa da fronteira e sempre re-varrida (nao pula quem subiu de rank).
+        if server_global:
+            positions_done = UsersSend.count_for_server(server_id=server_global.id)
+            resume_total = max(0, positions_done - RESUME_SAFETY_MARGIN)
+        else:
+            resume_total = int(outbox_total or 0)
         option_texts = self._resume_highscore_options(discovered_option_texts, resume_total)
         _audit(textLogs, "highscore_filters_discovered", filters=option_texts, filter_count=len(option_texts))
         self._update_server_users_count(self._highscore_total_from_options(discovered_option_texts), textLogs)
@@ -2453,14 +2552,20 @@ class BotDriver:
             )
             if textLogs:
                 cs = getattr(self, "_last_capture_state", {})
-                gap = int(cs.get("skipped_confirmed", 0)) + int(cs.get("ignored", 0)) + int(cs.get("unmessageable", 0))
+                gap = (
+                    int(cs.get("skipped_confirmed", 0))
+                    + int(cs.get("skipped_pending", 0))
+                    + int(cs.get("ignored", 0))
+                    + int(cs.get("unmessageable", 0))
+                )
                 if gap:
                     textLogs.addLogs(
                         f"Resumo {option_text}: {int(cs.get('sent_now', 0))} enviados | "
                         f"{int(cs.get('skipped_confirmed', 0))} ja no banco | "
+                        f"{int(cs.get('skipped_pending', 0))} aguardando re-tentativa (cooldown) | "
                         f"{int(cs.get('ignored', 0))} lista de ignorados | "
                         f"{int(cs.get('unmessageable', 0))} sem botao (proprio/aliado/inativo) | "
-                        f"{int(cs.get('cooldown_hit', 0))} cooldown | {int(cs.get('row_errors', 0))} linhas invalidas. "
+                        f"{int(cs.get('cooldown_hit', 0))} cooldown agora | {int(cs.get('row_errors', 0))} linhas invalidas. "
                         f"Nao ha jogadores messageable pulados.",
                         "info",
                     )
@@ -2477,6 +2582,7 @@ class BotDriver:
                 row_errors = int(capture_state.get("row_errors", 0))
                 reserved_count = int(capture_state.get("reserved", 0))
                 registered_skips = int(capture_state.get("skipped_confirmed", 0))
+                pending_skips = int(capture_state.get("skipped_pending", 0))
                 if target_count == 0:
                     if textLogs:
                         textLogs.addLogs(
@@ -2485,21 +2591,29 @@ class BotDriver:
                         )
                     force_next_select = True
                     continue
-                if registered_skips == target_count and reserved_count == 0:
+                # Nenhuma reserva nova nesta faixa = todos ja resolvidos (enviados/
+                # ignorados) ou aguardando re-tentativa de cooldown. Avanca sem tratar
+                # como erro (isso evita os falsos "Filtro bloqueado" que paravam a conta).
+                if reserved_count == 0:
                     if textLogs:
                         textLogs.addLogs(
-                            f"Filtro concluido: {target_count} jogadores ja registrados no banco. Avancando para a proxima faixa.",
+                            f"Filtro concluido nesta passagem: {registered_skips} ja no banco, "
+                            f"{pending_skips} aguardando re-tentativa. Avancando para a proxima faixa.",
                             "info",
                         )
                     force_next_select = True
                     continue
-                if target_count > 0:
-                    if textLogs:
-                        textLogs.addLogs(
-                            f"Filtro bloqueado: {target_count} jogadores reconhecidos, {reserved_count} reservas novas e {registered_skips} ja registrados. Nenhum envio foi concluido; nao avancando para a proxima faixa.",
-                            "error",
-                        )
-                    raise TimeoutException("highscore range has targets without confirmed sends")
+                # Houve reservas novas mas nenhuma confirmada (ex.: todas cairam em
+                # falha/ignore). Elas ficam marcadas para re-tentativa; avanca mesmo
+                # assim, pois um passe futuro re-processa quem faltou (dedup por nome).
+                if textLogs:
+                    textLogs.addLogs(
+                        f"Filtro sem envios confirmados: {reserved_count} reservas novas nao confirmadas "
+                        f"(serao re-tentadas depois). Avancando para a proxima faixa.",
+                        "warn",
+                    )
+                force_next_select = True
+                continue
         return not sent_any_total, sent_any_total, batch_exhausted_total
 
     @staticmethod
@@ -2558,21 +2672,18 @@ class BotDriver:
                 textLogs.addLogs("Tabela de ranking nao encontrada.", "warn")
             return False, False, False
         rows_before_resume = len(users)
-        resume_offset = self._current_filter_resume_offset()
         self._last_capture_state["rows"] = rows_before_resume
-        self._last_capture_state["resume_offset"] = resume_offset
-        if resume_offset:
-            users = users[resume_offset:]
-            _audit(
-                textLogs,
-                "ranking_resume_offset_applied",
-                filter=getattr(self, "_active_highscore_offset", None),
-                offset=resume_offset,
-                rows_before=rows_before_resume,
-                rows_after=len(users),
-                server=self.serverGlobal.display_name if self.serverGlobal else None,
-                server_total=int(self.serverGlobal.messageSend or 0) if self.serverGlobal else 0,
-            )
+        self._last_capture_state["resume_offset"] = 0
+        # Dedup por IDENTIDADE (nome), nunca por contagem/offset: carrega quem ja foi
+        # resolvido em definitivo (enviado/ignorado) neste servidor e pula essas linhas
+        # em memoria. Assim nao pulamos quem subiu de rank e nao re-escaneamos o banco
+        # milhares de vezes. Cooldown/failed NAO entram aqui -> passam pelo reserve()
+        # para serem re-tentados quando o tempo de espera vencer.
+        handled_keys = (
+            UsersSend.handled_username_keys(server_id=self.serverGlobal.id)
+            if self.serverGlobal
+            else set()
+        )
 
         max_send = self._compute_max_send()
         _audit(
@@ -2580,7 +2691,7 @@ class BotDriver:
             "ranking_rows_loaded",
             rows=rows_before_resume,
             rows_after_resume=len(users),
-            resume_offset=resume_offset,
+            resume_offset=0,
             max_send=max_send,
             server=self.serverGlobal.display_name if self.serverGlobal else None,
             server_total=int(self.serverGlobal.messageSend or 0) if self.serverGlobal else 0,
@@ -2663,14 +2774,20 @@ class BotDriver:
             try:
                 if not self.serverGlobal:
                     continue
+                if UsersSend.username_key(user_name) in handled_keys:
+                    # Ja enviado/ignorado em definitivo -> pula sem tocar o banco.
+                    self._last_capture_state["skipped_confirmed"] += 1
+                    continue
                 reservation = UsersSend.reserve(
                     server_id=self.serverGlobal.id,
                     username=user_name,
                     account_id=self.account.id,
                 )
                 if not reservation:
+                    # Existe registro mas nao esta pronto para re-tentar (cooldown ainda
+                    # no tempo de espera, ou reservado por outro worker). Fica pendente.
                     status = UsersSend.status_for(server_id=self.serverGlobal.id, username=user_name)
-                    self._last_capture_state["skipped_confirmed"] += 1
+                    self._last_capture_state["skipped_pending"] += 1
                     _audit(
                         textLogs,
                         "player_skipped_existing_record",
@@ -2708,7 +2825,9 @@ class BotDriver:
                         send_url=send_url,
                     )
                 except Exception as error:
-                    UsersSend.update_status(reservation.id_str, "failed")
+                    UsersSend.update_status(
+                        reservation.id_str, "failed", retry_at=time.time() + FAILED_RETRY_BACKOFF_SECONDS
+                    )
                     _audit(
                         textLogs,
                         "send_attempt_failed",
@@ -2749,7 +2868,11 @@ class BotDriver:
                         if self._server_cycle_send_count >= _server_send_batch_limit():
                             return False, sent_any, True
                         continue
-                    UsersSend.update_status(reservation.id_str, "cooldown")
+                    UsersSend.update_status(
+                        reservation.id_str,
+                        "cooldown",
+                        retry_at=time.time() + max(int(cooldown_seconds or 0), COOLDOWN_MIN_RETRY_SECONDS),
+                    )
                     self._last_capture_state["cooldown_hit"] += 1
                     raise BotCooldown(wait_seconds=cooldown_seconds or 60)
                 if status_send == "success":

@@ -595,7 +595,9 @@ def test_server_flow_syncs_outbox_once_before_resuming_highscore():
 
     completed, sent_any, batch_exhausted = bot._run_current_server_flow(logs)
 
-    assert events[:3] == ["outbox", "highscore", "51 - 100"]
+    # Outbox sincronizada UMA vez antes de abrir o ranking. Sem registros no banco
+    # (retomada por identidade), nenhuma faixa e descartada -> comeca na "1 - 50".
+    assert events[:3] == ["outbox", "highscore", "1 - 50"]
     assert completed is False
     assert sent_any is True
     assert batch_exhausted is True
@@ -744,7 +746,10 @@ def test_current_server_flow_logs_filter_without_new_users():
     assert "Filtro sem destinatarios reconhecidos: 0 linhas lidas, 0 linhas invalidas. Avancando para a proxima faixa." in logs.lines
 
 
-def test_current_server_flow_does_not_advance_when_targets_lack_confirmation():
+def test_current_server_flow_advances_when_no_new_reservations():
+    # Regressao: sem NENHUMA reserva nova numa faixa (todos ja enviados/ignorados ou
+    # aguardando cooldown), o fluxo AVANCA para a proxima faixa em vez de lancar
+    # "Filtro bloqueado" (que virava erro transitorio e parava a conta).
     bot = BotDriver.__new__(BotDriver)
     logs = FakeLogs()
 
@@ -755,12 +760,14 @@ def test_current_server_flow_does_not_advance_when_targets_lack_confirmation():
         def switch_to(self):
             return SimpleNamespace(window=lambda handle: None)
 
+    selected = []
     bot.driver = OneTabDriver()
+    bot.serverGlobal = FakeServer(users=200)
     bot.main_tab_handle = "main"
     bot.message_tab_handle = None
     bot.pause_event = SimpleNamespace(is_set=lambda: False)
     bot.last_activity_at = 0
-    bot._last_capture_state = {"targets": 1}
+    bot._last_capture_state = {"targets": 1, "reserved": 0, "skipped_confirmed": 1}
     bot._check_stop = lambda: None
     bot._is_stopped = lambda: False
     bot._close_extra_windows = lambda keep: None
@@ -770,21 +777,31 @@ def test_current_server_flow_does_not_advance_when_targets_lack_confirmation():
     bot._sleep = lambda seconds: None
     bot._get_highscore_options = lambda attempts=1, delay=0.8, reopen=None: ["1 - 50", "51 - 100"]
     bot._update_server_users_count = lambda users_count, logger: None
-    bot._select_highscore_offset = lambda option, force_open=False, textLogs=None: True
+    bot._select_highscore_offset = lambda option, force_open=False, textLogs=None: selected.append(option) or True
     bot._captureusers = lambda textLogs=None: (False, False, False)
 
-    try:
-        bot._run_current_server_flow(logs)
-        assert False, "a faixa nao pode avancar sem envio confirmado"
-    except start_module.TimeoutException:
-        pass
+    completed, sent_any, batch_exhausted = bot._run_current_server_flow(logs)
 
-    assert "Filtro bloqueado: 1 jogadores reconhecidos, 0 reservas novas e 0 ja registrados. Nenhum envio foi concluido; nao avancando para a proxima faixa." in logs.lines
+    # Nao lanca, avanca por ambas as faixas e conclui sem envios.
+    assert selected == ["1 - 50", "51 - 100"]
+    assert completed is True
+    assert sent_any is False
+    assert any("Avancando para a proxima faixa" in line for line in logs.lines)
 
 
 def test_capture_silently_skips_player_already_confirmed(monkeypatch):
-    monkeypatch.setattr(start_module.UsersSend, "reserve", lambda **kwargs: None)
-    monkeypatch.setattr(start_module.UsersSend, "status_for", lambda **kwargs: "sent")
+    # Dedup por IDENTIDADE: quem ja esta como enviado/ignorado no banco e pulado em
+    # memoria (via handled_username_keys), sem sequer chamar reserve().
+    monkeypatch.setattr(
+        start_module.UsersSend,
+        "handled_username_keys",
+        lambda **kwargs: {start_module.UsersSend.username_key("Player One")},
+    )
+    monkeypatch.setattr(
+        start_module.UsersSend,
+        "reserve",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("nao deve reservar quem ja foi confirmado")),
+    )
 
     bot = make_bot(users=700)
     logs = FakeLogs()
@@ -1459,12 +1476,16 @@ def test_current_filter_resume_offset_skips_rows_already_counted_by_outbox():
     assert bot._current_filter_resume_offset() == 9
 
 
-def test_capture_applies_outbox_offset_before_preparing_targets(monkeypatch):
+def test_capture_does_not_apply_count_offset_and_scans_every_row(monkeypatch):
+    # Regressao do bug de PULAR jogadores: o contador de enviados (messageSend) NAO
+    # deve mais cortar linhas do ranking. Todas as linhas sao varridas e o dedup e por
+    # identidade (nome ja no banco), nunca por offset de contagem.
     bot = make_bot(users=700)
     bot.serverGlobal.messageSend = 3
     bot._active_highscore_offset = "1 - 50"
     rows = [FakeRow(), FakeRow(), FakeRow(), FakeRow(), FakeRow()]
     bot._find_all_or_wait = lambda *args, **kwargs: rows
+    monkeypatch.setattr(start_module.UsersSend, "handled_username_keys", lambda **kwargs: set())
     monkeypatch.setattr(
         start_module.UsersSend,
         "reserve",
@@ -1478,9 +1499,10 @@ def test_capture_applies_outbox_offset_before_preparing_targets(monkeypatch):
     assert sent_any is True
     assert batch_exhausted is False
     assert bot._last_capture_state["rows"] == 5
-    assert bot._last_capture_state["resume_offset"] == 3
-    assert bot._last_capture_state["targets"] == 2
-    assert bot._last_capture_state["attempted"] == 2
+    assert bot._last_capture_state["resume_offset"] == 0
+    # Nenhuma linha cortada por contagem: todas viram alvo e sao processadas.
+    assert bot._last_capture_state["targets"] == 5
+    assert bot._last_capture_state["attempted"] == 5
 
 
 def test_click_next_outbox_page_accepts_localized_start_link():
@@ -1769,3 +1791,80 @@ def test_outbox_count_reads_only_first_page_without_resetting_total(monkeypatch)
     assert count == 2
     assert bot.serverGlobal.messageSend == 12
     assert bot._last_outbox_recipients == set()
+
+
+def test_cooldown_marks_retry_at_and_raises_bot_cooldown(monkeypatch):
+    # Regressao do BUG dos ~1012 presos: cooldown deve gravar retry_at (para ser
+    # re-tentado depois) e sinalizar BotCooldown, nunca virar "concluido" definitivo.
+    calls = []
+    monkeypatch.setattr(start_module.UsersSend, "reserve", lambda **kwargs: SimpleNamespace(id_str="r1"))
+    monkeypatch.setattr(start_module.UsersSend, "handled_username_keys", lambda **kwargs: set())
+    monkeypatch.setattr(start_module.UsersSend, "update_status", lambda *a, **k: calls.append((a, k)))
+
+    bot = make_bot(users=700)
+    bot.dry_run = False
+    bot._is_success_text = lambda text: False
+    bot._sendMessage = lambda username, send_url: ("cooldown", "Tem de esperar 45 segundos", 45)
+
+    raised = False
+    try:
+        bot._captureusers(FakeLogs())
+    except start_module.BotCooldown:
+        raised = True
+
+    assert raised is True
+    cooldown_calls = [(a, k) for a, k in calls if len(a) >= 2 and a[1] == "cooldown"]
+    assert cooldown_calls, "cooldown deveria marcar o registro"
+    retry_at = cooldown_calls[0][1].get("retry_at")
+    assert retry_at is not None and retry_at > start_module.time.time()
+
+
+def test_resume_highscore_options_drops_only_fully_covered_ranges():
+    opts = ["1 - 50", "51 - 100", "101 - 150"]
+    # Sem progresso -> nada e descartado.
+    assert BotDriver._resume_highscore_options(opts, 0) == opts
+    # 70 posicoes cobertas (com margem ja aplicada pelo chamador) -> "1 - 50" cai,
+    # mas a faixa da fronteira "51 - 100" continua sendo re-varrida.
+    assert BotDriver._resume_highscore_options(opts, 70) == ["51 - 100", "101 - 150"]
+
+
+def test_bootstrap_imports_outbox_recipients_when_db_empty(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(start_module.UsersSend, "count_for_server", lambda **kwargs: 0)
+    monkeypatch.setattr(
+        start_module.UsersSend,
+        "replace_server_outbox_snapshot",
+        lambda **kwargs: captured.update(kwargs) or len(kwargs["usernames"]),
+    )
+
+    bot = BotDriver.__new__(BotDriver)
+    bot.serverGlobal = FakeServer(users=700, message_send=0)
+    bot.account = SimpleNamespace(id="account-1")
+    bot._collect_outbox_recipients = lambda textLogs=None: ["JAIR", "march", "Yamall"]
+    logs = FakeLogs()
+
+    bot._maybe_import_outbox_recipients(logs)
+
+    assert captured["usernames"] == ["JAIR", "march", "Yamall"]
+    assert bot.serverGlobal.messageSend == 3
+    assert any("Retomada pela Outbox: 3" in line for line in logs.lines)
+    # Roda no maximo uma vez por servidor: segunda chamada nao reimporta.
+    bot._collect_outbox_recipients = lambda textLogs=None: (_ for _ in ()).throw(AssertionError("nao deve reimportar"))
+    bot._maybe_import_outbox_recipients(logs)
+
+
+def test_bootstrap_skips_import_when_db_already_has_history(monkeypatch):
+    monkeypatch.setattr(start_module.UsersSend, "count_for_server", lambda **kwargs: 42)
+    monkeypatch.setattr(
+        start_module.UsersSend,
+        "replace_server_outbox_snapshot",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("nao deve importar com historico local")),
+    )
+
+    bot = BotDriver.__new__(BotDriver)
+    bot.serverGlobal = FakeServer(users=700, message_send=42)
+    bot.account = SimpleNamespace(id="account-1")
+    bot._collect_outbox_recipients = lambda textLogs=None: (_ for _ in ()).throw(AssertionError("nao deve abrir a outbox"))
+
+    # Nao lanca: retorna cedo por ja haver historico local.
+    bot._maybe_import_outbox_recipients(FakeLogs())

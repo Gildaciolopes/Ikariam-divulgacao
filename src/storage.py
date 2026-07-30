@@ -419,10 +419,17 @@ class UsersSend:
     id: str = field(default_factory=_new_id)
 
     collection: ClassVar[str] = "users_send"
+    # Status transitorios que devem ser RE-tentados depois do tempo de espera,
+    # em vez de tratados como concluidos para sempre pelo dedup do reserve().
+    RETRIABLE_STATUSES: ClassVar[tuple[str, ...]] = ("cooldown", "failed")
 
     @property
     def id_str(self) -> str:
         return self.id
+
+    @staticmethod
+    def username_key(username: str | None) -> str:
+        return _normalize_username(username or "")
 
     @classmethod
     def from_doc(cls, doc: dict[str, Any]) -> "UsersSend":
@@ -470,13 +477,33 @@ class UsersSend:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """
-                SELECT id, username, account_id, status, created_at, updated_at
+                SELECT id, username, account_id, status, retry_at
                 FROM users_send
                 WHERE instance_id = ? AND server_id = ? AND username_key = ?
                 """,
                 (INSTANCE_ID, item.server_id, username_key),
             ).fetchone()
             if existing is not None:
+                existing_status = str(existing["status"] or "")
+                retry_at = existing["retry_at"]
+                ready = retry_at is None or float(retry_at) <= now
+                if existing_status in cls.RETRIABLE_STATUSES and ready:
+                    # Destinatario transitorio (cooldown/falha) cujo tempo de espera ja
+                    # passou: re-habilita para nova tentativa em vez de tratar como
+                    # concluido para sempre.
+                    connection.execute(
+                        "UPDATE users_send SET status = 'reserved', retry_at = NULL, "
+                        "account_id = COALESCE(account_id, ?), updated_at = ? WHERE id = ?",
+                        (item.account_id, now, existing["id"]),
+                    )
+                    connection.commit()
+                    return cls(
+                        id=str(existing["id"]),
+                        username=str(existing["username"] or item.username),
+                        server_id=item.server_id,
+                        account_id=existing["account_id"] or item.account_id,
+                        status="reserved",
+                    )
                 connection.rollback()
                 return None
             cursor = connection.execute(
@@ -567,9 +594,32 @@ class UsersSend:
         return len(recipients)
 
     @classmethod
-    def update_status(cls, id_value: Any, status: str) -> None:
+    def update_status(cls, id_value: Any, status: str, retry_at: float | None = None) -> None:
         with _connect() as connection:
-            connection.execute("UPDATE users_send SET status = ?, updated_at = ? WHERE id = ?", (status, _now_ts(), str(id_value)))
+            connection.execute(
+                "UPDATE users_send SET status = ?, retry_at = ?, updated_at = ? WHERE id = ?",
+                (status, retry_at, _now_ts(), str(id_value)),
+            )
+
+    @classmethod
+    def handled_username_keys(
+        cls, *, server_id: Any, statuses: tuple[str, ...] = ("sent", "ignored")
+    ) -> set[str]:
+        """Chaves de usuario ja resolvidas em definitivo (nao serao re-tentadas).
+
+        Serve como filtro de dedup em memoria para evitar milhares de chamadas de
+        reserve() re-escaneando quem ja foi enviado/ignorado.
+        """
+        if not statuses:
+            return set()
+        placeholders = ",".join("?" for _ in statuses)
+        with _connect() as connection:
+            rows = connection.execute(
+                f"SELECT username_key FROM users_send "
+                f"WHERE instance_id = ? AND server_id = ? AND status IN ({placeholders})",
+                (INSTANCE_ID, str(server_id), *statuses),
+            ).fetchall()
+        return {str(row["username_key"]) for row in rows}
 
     @classmethod
     def status_for(cls, *, server_id: Any, username: str) -> str | None:

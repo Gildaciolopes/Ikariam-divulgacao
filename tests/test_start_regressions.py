@@ -370,6 +370,24 @@ def test_find_feedback_uses_one_combined_wait(monkeypatch):
     assert calls[0][1] == 0.8
 
 
+def test_capture_state_tracks_send_breakdown_for_diagnostics(monkeypatch):
+    # Diagnostico do "gap": o capture_state deve contabilizar enviados, linhas
+    # invalidas e inenviaveis por filtro (para explicar posicao vs enviadas).
+    monkeypatch.setattr(start_module.UsersSend, "reserve", lambda **kwargs: SimpleNamespace(id_str="r1"))
+    monkeypatch.setattr(start_module.UsersSend, "update_status", lambda *a, **k: None)
+    bot = make_bot(users=700)
+    bot.dry_run = False
+
+    bot._captureusers(FakeLogs())
+
+    cs = bot._last_capture_state
+    assert cs["sent_now"] == 1
+    assert cs["row_errors"] == 1
+    assert cs["unmessageable"] == 0
+    assert cs["ignored"] == 0
+    assert cs["cooldown_hit"] == 0
+
+
 def test_message_preparation_fixed_waits_are_short():
     assert start_module.MESSAGE_TEXT_SETTLE_SECONDS <= 0.2
     assert start_module.MESSAGE_SCROLL_SETTLE_SECONDS <= 0.2
@@ -945,6 +963,31 @@ def test_cached_chromedriver_prefers_installed_chrome_major(monkeypatch, tmp_pat
     monkeypatch.setattr(start_module, "_installed_chrome_major", lambda: "149")
 
     assert start_module._cached_chromedriver_path() == str(current_driver)
+
+
+def test_cached_chromedriver_ignored_when_chrome_updated_past_cache(monkeypatch, tmp_path):
+    # Regressao: Chrome atualizou p/ 150 mas so ha driver 148/149 em cache.
+    # Nao pode devolver driver de outra versao (gera SessionNotCreatedException);
+    # deve retornar None p/ forcar o download do driver correto.
+    for version in ("148.0.1.1", "149.0.7827.155"):
+        driver = tmp_path / ".wdm" / "drivers" / "chromedriver" / "win64" / version / "chromedriver-win32" / "chromedriver.exe"
+        driver.parent.mkdir(parents=True)
+        driver.write_text(version)
+    monkeypatch.setattr(start_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(start_module, "_installed_chrome_major", lambda: "150")
+
+    assert start_module._cached_chromedriver_path() is None
+
+
+def test_driver_version_mismatch_detection():
+    mismatch = start_module.SessionNotCreatedException(
+        "session not created: This version of ChromeDriver only supports Chrome version 149"
+    )
+    assert start_module._is_driver_version_mismatch(mismatch) is True
+    lock = start_module.SessionNotCreatedException(
+        "session not created: probably user data directory is already in use"
+    )
+    assert start_module._is_driver_version_mismatch(lock) is False
 
 
 def test_profile_process_cleanup_runs_powershell_without_console_window(monkeypatch, tmp_path):

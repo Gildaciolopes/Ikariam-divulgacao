@@ -2476,7 +2476,7 @@ class BotDriver:
         # confirmacao "Outbox sincronizada" nao aparecia e parecia que a Outbox parou de
         # carregar. Loga o resultado aqui para o usuario ver que sincronizou.
         if outbox_total is not None and synced_silently and textLogs:
-            textLogs.addLogs(f"Outbox sincronizada: {outbox_total} mensagens no jogo.", "info")
+            textLogs.addLogs(f"Outbox sincronizada: {outbox_total} mensagens encontradas.", "info")
         if outbox_total is None:
             if textLogs:
                 textLogs.addLogs(

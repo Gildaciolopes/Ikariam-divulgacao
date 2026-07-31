@@ -1828,6 +1828,20 @@ def test_resume_highscore_options_drops_only_fully_covered_ranges():
     assert BotDriver._resume_highscore_options(opts, 70) == ["51 - 100", "101 - 150"]
 
 
+def test_resume_floor_uses_outbox_count_when_db_is_behind():
+    # Cenario real do cliente (data.rar): banco local=275 registros, mas a Outbox do
+    # jogo tem 5960 enviados (historico). O piso deve vir da Outbox para NAO re-enviar
+    # os ~5600 ja contatados que nao estao no banco local.
+    assert BotDriver._resume_floor(275, 5960, 50) == 5910
+    # Banco a frente da contagem da Outbox (ex.: Outbox indisponivel = 0): usa o banco.
+    assert BotDriver._resume_floor(300, 0, 50) == 250
+    # Cobertura menor que a margem nunca vira negativa.
+    assert BotDriver._resume_floor(0, 0, 50) == 0
+    assert BotDriver._resume_floor(20, 10, 50) == 0
+    # Sync da Outbox falhou (None) nao quebra o calculo.
+    assert BotDriver._resume_floor(120, None, 50) == 70
+
+
 def test_bootstrap_imports_outbox_recipients_when_db_empty(monkeypatch):
     captured = {}
     monkeypatch.setattr(start_module.UsersSend, "count_for_server", lambda **kwargs: 0)

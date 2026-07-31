@@ -2463,13 +2463,20 @@ class BotDriver:
         # ainda estar carregando e a rota da Outbox nao ser reconhecida. Re-tenta a
         # sincronizacao algumas vezes antes de cair para o progresso local.
         outbox_total = None
+        synced_silently = False
         for sync_attempt in range(1, OUTBOX_SYNC_RETRY_ATTEMPTS + 1):
             last_attempt = sync_attempt == OUTBOX_SYNC_RETRY_ATTEMPTS
             outbox_total = self._sync_outbox_sent_users(textLogs if last_attempt else None)
             if outbox_total is not None:
+                synced_silently = not last_attempt
                 break
             if not last_attempt:
                 self._sleep(SHORT_WAIT_SECONDS * 2)
+        # Sucesso na 1a/2a tentativa passa textLogs=None (sem ruido de warning), entao a
+        # confirmacao "Outbox sincronizada" nao aparecia e parecia que a Outbox parou de
+        # carregar. Loga o resultado aqui para o usuario ver que sincronizou.
+        if outbox_total is not None and synced_silently and textLogs:
+            textLogs.addLogs(f"Outbox sincronizada: {outbox_total} mensagens no jogo.", "info")
         if outbox_total is None:
             if textLogs:
                 textLogs.addLogs(
@@ -2491,13 +2498,16 @@ class BotDriver:
         highscore_link = self._open_highscore_page()
         self._sleep(SHORT_WAIT_SECONDS)
         discovered_option_texts = self._get_highscore_options(attempts=3, delay=1.5, reopen=highscore_link)
-        # Retoma por POSICOES ja processadas no banco (qualquer status: enviado,
-        # cooldown, ignorado, falha), com margem de seguranca, em vez de pelo contador
-        # de enviados. Assim faixas ja cobertas sao puladas para performance, mas a
-        # faixa da fronteira e sempre re-varrida (nao pula quem subiu de rank).
+        # Retoma pela COBERTURA real: o maior entre as posicoes ja no banco local e a
+        # CONTAGEM da Outbox do jogo. A Outbox e a verdade sobre quem ja recebeu e sua
+        # contagem e confiavel (cabecalho) mesmo quando o scraping de NOMES falha. Sem
+        # esse piso, um banco local atras da Outbox (ex.: .exe/banco novo, ou nomes nao
+        # importados) faria o bot RE-ENVIAR milhares de jogadores ja contatados. A margem
+        # re-varre a fronteira (pega quem subiu de rank) e o dedup por identidade cuida
+        # do resto.
         if server_global:
             positions_done = UsersSend.count_for_server(server_id=server_global.id)
-            resume_total = max(0, positions_done - RESUME_SAFETY_MARGIN)
+            resume_total = self._resume_floor(positions_done, outbox_total, RESUME_SAFETY_MARGIN)
         else:
             resume_total = int(outbox_total or 0)
         option_texts = self._resume_highscore_options(discovered_option_texts, resume_total)
@@ -2615,6 +2625,15 @@ class BotDriver:
                 force_next_select = True
                 continue
         return not sent_any_total, sent_any_total, batch_exhausted_total
+
+    @staticmethod
+    def _resume_floor(positions_done: int, outbox_total: int | None, margin: int) -> int:
+        """Piso de retomada = maior cobertura conhecida (banco local OU contagem da
+        Outbox do jogo) menos a margem de seguranca. Usar a CONTAGEM da Outbox como piso
+        evita re-enviar quem ja recebeu quando o banco local esta atras (ex.: .exe/banco
+        novo, ou quando o scraping de NOMES da Outbox falha mas a contagem funciona)."""
+        coverage = max(int(positions_done or 0), int(outbox_total or 0))
+        return max(0, coverage - margin)
 
     @staticmethod
     def _resume_highscore_options(option_texts: list[str], sent_total: int) -> list[str]:
